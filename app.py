@@ -3,6 +3,7 @@ import io
 import html
 import json
 from datetime import date, datetime
+from pathlib import Path
 from uuid import uuid4
 
 import pandas as pd
@@ -10,32 +11,135 @@ import streamlit as st
 
 st.set_page_config(page_title="IAQ Assessment Tool", page_icon="🏢", layout="wide")
 
-BASES = ["SIA 382/1:2025", "SECO / ArGV 3", "SN EN 16798-1", "Minergie-ECO", "Bachelor-Thesis – eigenes Bewertungsmodell"]
+BASES = ["SIA 382/1:2025", "SECO / ArGV 3", "Minergie-ECO", "Bachelor-Thesis – eigenes Bewertungsmodell"]
 LEGACY_BASES = {"SIA 382/1": "SIA 382/1:2025"}
 PROFILE_DESCRIPTIONS = {
     "SIA 382/1:2025": "Raumluftqualität und relevante Innenraumklimakriterien; Anwendbarkeit je Lüftungsart prüfen.",
     "SECO / ArGV 3": "Arbeitsplatzbezogene Anforderungen an die Innenraumluft und das Raumklima.",
-    "SN EN 16798-1": "Kategorien der Innenraumqualität; Überschneidungen mit SIA transparent dokumentieren.",
     "Minergie-ECO": "Nur für die gewählten IAQ-Parameter relevante Kriterien; kein gesamtes Gebäudezertifikat.",
-    "Bachelor-Thesis – eigenes Bewertungsmodell": "Eigenes Forschungsprofil: strengste fachlich vergleichbare und anwendbare Kriterien je Parameter; Herkunft dokumentieren. Noch keine automatische Kombination.",
+    "Bachelor-Thesis – eigenes Bewertungsmodell": "BT-Screening aus SECO-Komfort- und CO₂-Orientierungswerten; SIA- und ECO-Zusatzkriterien getrennt ausgewiesen. Keine Konformitätsprüfung.",
 }
 PERIODS = ["Heizperiode", "Kühlperiode"]
 VENTILATIONS = ["Mechanische Lüftung", "Natürliche Lüftung / Fensterlüftung", "Kombinierte / hybride Lüftung"]
 STRATEGIES = ["Kontinuierliches Monitoring", "Temporäre Messkampagne", "Stichproben- / Kontrollmessung"]
-PARAMETERS = ["CO₂", "Temperatur", "Relative Feuchte", "Luftgeschwindigkeit", "Weitere"]
-UNITS = {"CO₂": "ppm", "Temperatur": "°C", "Relative Feuchte": "%", "Luftgeschwindigkeit": "m/s", "Weitere": ""}
-PROFILE_IDS = {(b, p): id_ for b, stem in zip(BASES, ["S", "E", "N", "M", "BT"]) for p, id_ in zip(PERIODS, [stem+"H", stem+"K"])}
+PARAMETERS = ["CO₂", "Temperatur", "Relative Feuchte", "Formaldehyd", "TVOC", "Radon", "Luftgeschwindigkeit", "Weitere"]
+UNITS = {"CO₂": "ppm", "Temperatur": "°C", "Relative Feuchte": "%", "Formaldehyd": "µg/m³", "TVOC": "µg/m³", "Radon": "Bq/m³", "Luftgeschwindigkeit": "m/s", "Weitere": ""}
+PROFILE_IDS = {(b, p): id_ for b, stem in zip(BASES, ["S", "E", "M", "BT"]) for p, id_ in zip(PERIODS, [stem+"H", stem+"K"])}
+
+# IDA 2: vorläufige SIA-Referenzmatrix aus SIA 382/1:2025.
+# Diese Daten dienen zur Anzeige, nicht zur automatischen Norm-Konformitätsprüfung.
+SIA_IDA2_MATRIX = [{'Periode': 'Heizperiode', 'Lüftungsart': 'Mechanisch', 'Konditionierung': 'Beheizt · ohne aktive Befeuchtung', 'Temperatur': '19,8–24,4 °C (IEQ II)', 'r. F.': '>30 % r. F. (bei 21 °C)', 'CO₂': '≤1’200 ppm (IDA 2; 400 ppm aussen)', 'CO₂ Auslegung': '1’100 ppm (Auslegungswert)', 'CO₂-Differenz': '≤800 ppm über Aussenluft (Klasse)', 'Aussenluft / Person': '29 m³/h je Person (Auslegung)', 'Feuchte-Toleranz': 'max. 10 % der jährlichen Nutzungszeit', 'Bemerkung / Vergleichsszenario': 'IDA 2 gilt für CO₂; IEQ II für Temperatur ist gesonderte Projektannahme. Feuchteangaben bei 21/26 °C im Mittelland; Auslegungs- und Klassenwerte nicht gleichsetzen. Ohne Fensterstützung empfiehlt SIA IDA 1.'}, {'Periode': 'Heizperiode', 'Lüftungsart': 'Mechanisch', 'Konditionierung': 'Beheizt · mit aktiver Befeuchtung', 'Temperatur': '19,8–24,4 °C (IEQ II)', 'r. F.': '30 % (Befeuchtungs-Bemessung)', 'CO₂': '≤1’200 ppm (IDA 2; 400 ppm aussen)', 'CO₂ Auslegung': '1’100 ppm (Auslegungswert)', 'CO₂-Differenz': '≤800 ppm über Aussenluft (Klasse)', 'Aussenluft / Person': '29 m³/h je Person (Auslegung)', 'Feuchte-Toleranz': '', 'Bemerkung / Vergleichsszenario': 'IDA 2 gilt für CO₂; IEQ II für Temperatur ist gesonderte Projektannahme. Feuchteangaben bei 21/26 °C im Mittelland; Auslegungs- und Klassenwerte nicht gleichsetzen. Ohne Fensterstützung empfiehlt SIA IDA 1.'}, {'Periode': 'Heizperiode', 'Lüftungsart': 'Mechanisch', 'Konditionierung': 'Nicht beheizt', 'Temperatur': '', 'r. F.': '', 'CO₂': '', 'CO₂ Auslegung': '', 'CO₂-Differenz': '', 'Aussenluft / Person': '', 'Feuchte-Toleranz': '', 'Bemerkung / Vergleichsszenario': 'Kein Heizfall-Grenzwert für unbeheizte Räume aus Tabelle 6. Vergleich: mechanisch, Heizperiode, beheizt; nur nach fachlicher Prüfung.'}, {'Periode': 'Heizperiode', 'Lüftungsart': 'Natürlich / Fensterlüftung', 'Konditionierung': 'Beheizt · ohne aktive Befeuchtung', 'Temperatur': '', 'r. F.': '', 'CO₂': '', 'CO₂ Auslegung': '', 'CO₂-Differenz': '', 'Aussenluft / Person': '', 'Feuchte-Toleranz': '', 'Bemerkung / Vergleichsszenario': 'Keine direkten SIA-382/1-Grenzwerte für natürliche Lüftung (0.1.6). Als Orientierung: mechanisch, gleiche Periode/Konditionierung; eigene Prüfung nach SIA 180 erforderlich.'}, {'Periode': 'Heizperiode', 'Lüftungsart': 'Natürlich / Fensterlüftung', 'Konditionierung': 'Beheizt · mit aktiver Befeuchtung', 'Temperatur': '', 'r. F.': '', 'CO₂': '', 'CO₂ Auslegung': '', 'CO₂-Differenz': '', 'Aussenluft / Person': '', 'Feuchte-Toleranz': '', 'Bemerkung / Vergleichsszenario': 'Keine direkten SIA-382/1-Grenzwerte für natürliche Lüftung (0.1.6). Als Orientierung: mechanisch, gleiche Periode/Konditionierung; eigene Prüfung nach SIA 180 erforderlich.'}, {'Periode': 'Heizperiode', 'Lüftungsart': 'Natürlich / Fensterlüftung', 'Konditionierung': 'Nicht beheizt', 'Temperatur': '', 'r. F.': '', 'CO₂': '', 'CO₂ Auslegung': '', 'CO₂-Differenz': '', 'Aussenluft / Person': '', 'Feuchte-Toleranz': '', 'Bemerkung / Vergleichsszenario': 'Keine direkten SIA-382/1-Grenzwerte für natürliche Lüftung (0.1.6). Als Orientierung: mechanisch, gleiche Periode/Konditionierung; eigene Prüfung nach SIA 180 erforderlich.'}, {'Periode': 'Heizperiode', 'Lüftungsart': 'Hybrid', 'Konditionierung': 'Beheizt · ohne aktive Befeuchtung', 'Temperatur': '', 'r. F.': '', 'CO₂': '', 'CO₂ Auslegung': '', 'CO₂-Differenz': '', 'Aussenluft / Person': '', 'Feuchte-Toleranz': '', 'Bemerkung / Vergleichsszenario': 'Nicht pauschal übertragbar. Mechanischen Betriebsmodus getrennt betrachten; Vergleich: mechanisch, gleiche Periode/Konditionierung. Natürlichen Modus nach SIA 180 prüfen.'}, {'Periode': 'Heizperiode', 'Lüftungsart': 'Hybrid', 'Konditionierung': 'Beheizt · mit aktiver Befeuchtung', 'Temperatur': '', 'r. F.': '', 'CO₂': '', 'CO₂ Auslegung': '', 'CO₂-Differenz': '', 'Aussenluft / Person': '', 'Feuchte-Toleranz': '', 'Bemerkung / Vergleichsszenario': 'Nicht pauschal übertragbar. Mechanischen Betriebsmodus getrennt betrachten; Vergleich: mechanisch, gleiche Periode/Konditionierung. Natürlichen Modus nach SIA 180 prüfen.'}, {'Periode': 'Heizperiode', 'Lüftungsart': 'Hybrid', 'Konditionierung': 'Nicht beheizt', 'Temperatur': '', 'r. F.': '', 'CO₂': '', 'CO₂ Auslegung': '', 'CO₂-Differenz': '', 'Aussenluft / Person': '', 'Feuchte-Toleranz': '', 'Bemerkung / Vergleichsszenario': 'Nicht pauschal übertragbar. Mechanischen Betriebsmodus getrennt betrachten; Vergleich: mechanisch, gleiche Periode/Konditionierung. Natürlichen Modus nach SIA 180 prüfen.'}, {'Periode': 'Kühlperiode', 'Lüftungsart': 'Mechanisch', 'Konditionierung': 'Aktiv gekühlt · ohne aktive Entfeuchtung', 'Temperatur': '22,9–26,1 °C (IEQ II)', 'r. F.': '<62 % r. F. (bei 26 °C)', 'CO₂': '≤1’200 ppm (IDA 2; 400 ppm aussen)', 'CO₂ Auslegung': '1’100 ppm (Auslegungswert)', 'CO₂-Differenz': '≤800 ppm über Aussenluft (Klasse)', 'Aussenluft / Person': '29 m³/h je Person (Auslegung)', 'Feuchte-Toleranz': 'max. 10 % der jährlichen Nutzungszeit', 'Bemerkung / Vergleichsszenario': 'IDA 2 gilt für CO₂; IEQ II für Temperatur ist gesonderte Projektannahme. Feuchteangaben bei 21/26 °C im Mittelland; Auslegungs- und Klassenwerte nicht gleichsetzen. Ohne Fensterstützung empfiehlt SIA IDA 1.'}, {'Periode': 'Kühlperiode', 'Lüftungsart': 'Mechanisch', 'Konditionierung': 'Aktiv gekühlt · mit aktiver Entfeuchtung', 'Temperatur': '22,9–26,1 °C (IEQ II)', 'r. F.': '60 % (Entfeuchtungs-Bemessung)', 'CO₂': '≤1’200 ppm (IDA 2; 400 ppm aussen)', 'CO₂ Auslegung': '1’100 ppm (Auslegungswert)', 'CO₂-Differenz': '≤800 ppm über Aussenluft (Klasse)', 'Aussenluft / Person': '29 m³/h je Person (Auslegung)', 'Feuchte-Toleranz': '', 'Bemerkung / Vergleichsszenario': 'IDA 2 gilt für CO₂; IEQ II für Temperatur ist gesonderte Projektannahme. Feuchteangaben bei 21/26 °C im Mittelland; Auslegungs- und Klassenwerte nicht gleichsetzen. Ohne Fensterstützung empfiehlt SIA IDA 1.'}, {'Periode': 'Kühlperiode', 'Lüftungsart': 'Mechanisch', 'Konditionierung': 'Ohne aktive Kühlung', 'Temperatur': '', 'r. F.': '', 'CO₂': '', 'CO₂ Auslegung': '', 'CO₂-Differenz': '', 'Aussenluft / Person': '', 'Feuchte-Toleranz': '', 'Bemerkung / Vergleichsszenario': 'Kein fester Temperaturbereich für nicht aktiv gekühlten Raum aus Tabelle 6. Vergleich: mechanisch, Kühlperiode, aktiv gekühlt; nicht direkt übertragbar. SIA 180 prüfen.'}, {'Periode': 'Kühlperiode', 'Lüftungsart': 'Natürlich / Fensterlüftung', 'Konditionierung': 'Aktiv gekühlt · ohne aktive Entfeuchtung', 'Temperatur': '', 'r. F.': '', 'CO₂': '', 'CO₂ Auslegung': '', 'CO₂-Differenz': '', 'Aussenluft / Person': '', 'Feuchte-Toleranz': '', 'Bemerkung / Vergleichsszenario': 'Keine direkten SIA-382/1-Grenzwerte für natürliche Lüftung (0.1.6). Als Orientierung: mechanisch, gleiche Periode/Konditionierung; eigene Prüfung nach SIA 180 erforderlich.'}, {'Periode': 'Kühlperiode', 'Lüftungsart': 'Natürlich / Fensterlüftung', 'Konditionierung': 'Aktiv gekühlt · mit aktiver Entfeuchtung', 'Temperatur': '', 'r. F.': '', 'CO₂': '', 'CO₂ Auslegung': '', 'CO₂-Differenz': '', 'Aussenluft / Person': '', 'Feuchte-Toleranz': '', 'Bemerkung / Vergleichsszenario': 'Keine direkten SIA-382/1-Grenzwerte für natürliche Lüftung (0.1.6). Als Orientierung: mechanisch, gleiche Periode/Konditionierung; eigene Prüfung nach SIA 180 erforderlich.'}, {'Periode': 'Kühlperiode', 'Lüftungsart': 'Natürlich / Fensterlüftung', 'Konditionierung': 'Ohne aktive Kühlung', 'Temperatur': '', 'r. F.': '', 'CO₂': '', 'CO₂ Auslegung': '', 'CO₂-Differenz': '', 'Aussenluft / Person': '', 'Feuchte-Toleranz': '', 'Bemerkung / Vergleichsszenario': 'Keine direkten SIA-382/1-Grenzwerte für natürliche Lüftung (0.1.6). Als Orientierung: mechanisch, gleiche Periode/Konditionierung; eigene Prüfung nach SIA 180 erforderlich.'}, {'Periode': 'Kühlperiode', 'Lüftungsart': 'Hybrid', 'Konditionierung': 'Aktiv gekühlt · ohne aktive Entfeuchtung', 'Temperatur': '', 'r. F.': '', 'CO₂': '', 'CO₂ Auslegung': '', 'CO₂-Differenz': '', 'Aussenluft / Person': '', 'Feuchte-Toleranz': '', 'Bemerkung / Vergleichsszenario': 'Nicht pauschal übertragbar. Mechanischen Betriebsmodus getrennt betrachten; Vergleich: mechanisch, gleiche Periode/Konditionierung. Natürlichen Modus nach SIA 180 prüfen.'}, {'Periode': 'Kühlperiode', 'Lüftungsart': 'Hybrid', 'Konditionierung': 'Aktiv gekühlt · mit aktiver Entfeuchtung', 'Temperatur': '', 'r. F.': '', 'CO₂': '', 'CO₂ Auslegung': '', 'CO₂-Differenz': '', 'Aussenluft / Person': '', 'Feuchte-Toleranz': '', 'Bemerkung / Vergleichsszenario': 'Nicht pauschal übertragbar. Mechanischen Betriebsmodus getrennt betrachten; Vergleich: mechanisch, gleiche Periode/Konditionierung. Natürlichen Modus nach SIA 180 prüfen.'}, {'Periode': 'Kühlperiode', 'Lüftungsart': 'Hybrid', 'Konditionierung': 'Ohne aktive Kühlung', 'Temperatur': '', 'r. F.': '', 'CO₂': '', 'CO₂ Auslegung': '', 'CO₂-Differenz': '', 'Aussenluft / Person': '', 'Feuchte-Toleranz': '', 'Bemerkung / Vergleichsszenario': 'Nicht pauschal übertragbar. Mechanischen Betriebsmodus getrennt betrachten; Vergleich: mechanisch, gleiche Periode/Konditionierung. Natürlichen Modus nach SIA 180 prüfen.'}]
+# Konsistente Regelmatrix: Daten aus demselben Stand wie Excel-Blatt «BT».
+# Die Werte dienen einem freiwilligen Screening, nicht der Feststellung von Rechtskonformität.
+BT_RULES = json.loads((Path(__file__).parent / "bewertungsregeln.json").read_text(encoding="utf-8"))
+
+def effective_ventilation(room):
+    v = room.get("ventilation", "")
+    if v == "Mechanische Lüftung":
+        return "Mechanisch"
+    if v == "Natürliche Lüftung / Fensterlüftung":
+        return "Natürlich"
+    m = str(room.get("ventilation_mode", "")).lower()
+    if m in ("mechanisch", "mechanischer modus"):
+        return "Hybrid – mechanischer Modus"
+    if m in ("natürlich", "natuerlich", "natürlicher modus"):
+        return "Hybrid – natürlicher Modus"
+    return None
+
+def bt_rule_for_room(assessment, room):
+    vent = effective_ventilation(room)
+    if vent is None:
+        return None
+    cooling = bool(room.get("active_cooling", False)) if assessment.get("period") == "Kühlperiode" else False
+    return next((r for r in BT_RULES if r["periode"] == assessment.get("period") and r["lueftung"] == vent and r["aktive_kuehlung"] == cooling), None)
+
+def screening_rows(assessment, room):
+    """Nur direkt mit diesen einfachen Messgeräten vergleichbare BT-Orientierungswerte."""
+    rule = bt_rule_for_room(assessment, room)
+    if not rule:
+        return []
+    checks = {"CO₂": (None, rule["co2_target_exclusive"], "<", "ppm", rule["quellen"]["co2"]),
+              "Temperatur": (rule["temp_min"],rule["temp_max"], "range", "°C", rule["quellen"]["temp"]),
+              "Relative Feuchte": (rule["rh_min"],rule["rh_max"],"range","%",rule["quellen"]["rh"])}
+    out = []
+    for param,(low,high,kind,unit,source) in checks.items():
+        vals = [m["value"] for m in valid_measurements(room) if m["parameter"]==param and m["unit"]==unit]
+        if not vals:
+            out.append({"Parameter":param,"BT-Orientierungswert":f"{low:g}–{high:g} {unit}" if low is not None else f"<{high:g} {unit}","Messwerte":0,"Ausserhalb Ziel": "Keine Daten", "Quelle":source})
+            continue
+        bad = sum(v>=high if kind=='<' else (v<low or v>high) for v in vals)
+        out.append({"Parameter":param,"BT-Orientierungswert":f"{low:g}–{high:g} {unit}" if low is not None else f"<{high:g} {unit}","Messwerte":len(vals),"Ausserhalb Ziel":f"{bad} von {len(vals)}","Quelle":source})
+    return out
+
+def show_profile_rule(assessment, room):
+    basis = assessment.get("basis")
+    rule = bt_rule_for_room(assessment, room)
+    if not rule:
+        st.info("Für eine eindeutige Szenariozuordnung bitte Raumlüftung, bei Hybrid auch den aktuellen Betriebsmodus, und aktive Kühlung angeben.")
+        return
+    if basis == "Bachelor-Thesis – eigenes Bewertungsmodell":
+        st.markdown("**BT – strengstes fachlich vertretbares Orientierungsprofil**")
+        st.dataframe(pd.DataFrame([{"Temperatur (Luft)":f'{rule["temp_min"]:g}–{rule["temp_max"]:g} °C',"Relative Feuchte":f'{rule["rh_min"]:g}–{rule["rh_max"]:g} %',"CO₂-Ziel":'<1’000 ppm',"CO₂ SIA IDA 2":'≤1’200 ppm' if rule["co2_sia_class_max"] else 'nicht direkt anwendbar'}]),use_container_width=True,hide_index=True)
+        st.caption("BT-Werte = SECO-Orientierung, keine pauschal verbindlichen gesetzlichen Grenzwerte. SIA-IDA-2 ist eine andere Bewertungsart; Lüftungsmodus beachten.")
+        with st.expander("Weitere ECO-Kriterien und Normstellen"):
+            st.write("ECO 2023.1 (Zertifizierung): Formaldehyd ≤60 µg/m³ und TVOC ≤1’000 µg/m³ bei aktiver Messung; Radon Neubau ≤100 / nach Erneuerung ≤300 Bq/m³. Nicht mit laufenden Sensormessungen gleichsetzen.")
+            st.write(rule["hinweis"])
+        st.markdown("**BT-Messdaten-Screening**")
+        st.dataframe(pd.DataFrame(screening_rows(assessment, room)),use_container_width=True,hide_index=True)
+        st.caption("Ausserhalb Ziel = Anzahl einzelner Messwerte ausserhalb des Komfort-/Qualitätsziels; keine zeitgewichtete Prüfung, kein gesetzlicher oder zertifizierungsrechtlicher Konformitätsentscheid.")
+    elif basis == "SIA 382/1:2025":
+        st.markdown("**SIA 382/1:2025 – IDA 2**")
+        if rule["co2_sia_class_max"] is not None:
+            st.dataframe(pd.DataFrame([{"CO₂-Klassengrenze": "≤1’200 ppm (bei 400 ppm Aussenluft)", "CO₂-Auslegungswert": "1’100 ppm", "Temperatur": "IEQ II: siehe SIA, operative Temperatur"}]),use_container_width=True,hide_index=True)
+            st.caption("IDA 2 ist eine Klassengrenze und kein pauschales CO₂-Rechtsmaximum. Auslegungswert und Komfortklasse getrennt anwenden.")
+            vals=[m["value"] for m in valid_measurements(room) if m["parameter"]=="CO₂" and m["unit"]=="ppm"]
+            if vals: st.info(f"SIA-Vergleich (nur orientierend): {sum(v>1200 for v in vals)} von {len(vals)} CO₂-Einzelwerten über 1’200 ppm. Aussenluft und Messbedingungen prüfen.")
+        else:
+            st.warning("SIA 382/1 nicht direkt für natürliche Lüftungsphasen anwendbar. Temperatur nach SIA 180 separat mit Aussenklima bewerten.")
+    elif basis == "SECO / ArGV 3":
+        st.markdown("**SECO-Wegleitung – Orientierungswerte (keine pauschalen Gesetzesgrenzen)**")
+        st.dataframe(pd.DataFrame([{"Lufttemperatur": f'{rule["temp_min"]:g}–{rule["temp_max"]:g} °C', "r. F.":"30–60 %", "CO₂": "<1’000 ppm"}]),use_container_width=True,hide_index=True)
+    elif basis == "Minergie-ECO":
+        st.markdown("**ECO 2023.1 – Schadstoffkriterien des Zertifizierungsverfahrens**")
+        st.dataframe(pd.DataFrame([{"Formaldehyd (aktiv)":"≤60 µg/m³", "TVOC (aktiv)":"≤1’000 µg/m³", "Radon Neubau":"≤100 Bq/m³", "Radon nach Erneuerung":"≤300 Bq/m³"}]),use_container_width=True,hide_index=True)
+        st.caption("CO₂, Lufttemperatur und relative Feuchte sind keine eigenständigen ECO-2023.1-Betriebsgrenzen. Für sie können separate SIA-/SECO-Profile verwendet werden.")
+        st.warning("Aus normalen Raum-Sensordaten ist keine ECO-Zertifizierung ableitbar. Schadstoffmessungen erfordern die Verfahren und Randbedingungen nach ECO 2023.1, Anhang 9.")
+
+HEATING_CONDITIONS = ["Beheizt · ohne aktive Befeuchtung", "Beheizt · mit aktiver Befeuchtung", "Nicht beheizt"]
+COOLING_CONDITIONS = ["Aktiv gekühlt · ohne aktive Entfeuchtung", "Aktiv gekühlt · mit aktiver Entfeuchtung", "Ohne aktive Kühlung"]
+
+def rule_for_room(assessment, room):
+    if assessment.get("basis") != "SIA 382/1:2025":
+        return None
+    vent = {"Mechanische Lüftung": "Mechanisch", "Natürliche Lüftung / Fensterlüftung": "Natürlich / Fensterlüftung", "Kombinierte / hybride Lüftung": "Hybrid"}.get(room.get("ventilation"))
+    return next((row for row in SIA_IDA2_MATRIX if row["Periode"] == assessment.get("period") and row["Lüftungsart"] == vent and row["Konditionierung"] == room.get("conditioning")), None)
+
+def show_sia_rule(assessment, room):
+    if assessment.get("basis") != "SIA 382/1:2025":
+        return
+    rule = rule_for_room(assessment, room)
+    st.markdown("**SIA 382/1:2025 – Referenzprofil IDA 2 für diesen Raum**")
+    if rule is None:
+        st.info("Bitte unter «3 · Räume & Lüftung» eine zur Periode passende Konditionierung auswählen.")
+        return
+    main = {k: rule[k] or "—" for k in ["Temperatur", "r. F.", "CO₂"]}
+    st.dataframe(pd.DataFrame([main]),use_container_width=True,hide_index=True)
+    with st.expander("Weitere Kriterien und Gültigkeitsbedingungen"):
+        st.dataframe(pd.DataFrame([{k:rule[k] or "—" for k in ["CO₂ Auslegung", "CO₂-Differenz", "Aussenluft / Person", "Feuchte-Toleranz"]}]), use_container_width=True, hide_index=True)
+        st.write(rule["Bemerkung / Vergleichsszenario"])
+    st.caption("Nur zur fachlichen Orientierung. IDA 2 ist eine CO₂-Kategorie; IEQ II ist eine gesonderte Temperaturannahme. Leere Werte werden nicht als Freigabe interpretiert. Keine automatische Konformitätsprüfung.")
+
 STEPS = [
     ("B", "Gebäudespezifikation", "Gebäudetyp auswählen und Erweiterbarkeit dokumentieren"),
     ("BD", "Gebäudeweite Stammdaten", "Objekt, Standort und Grundnutzung erfassen"),
     ("NU", "Nutzungsprofil", "Betriebszeiten und typische Belegung hinterlegen"),
     ("GV", "Gültigkeit der Gebäudedaten", "Vollständigkeit und Aktualität prüfen"),
-    ("D", "Bewertungsgrundlage", "SIA, SECO, SN EN 16798-1, Minergie-ECO oder Bachelor-Thesis auswählen"),
+    ("D", "Bewertungsgrundlage", "SIA, SECO, Minergie-ECO oder Bachelor-Thesis auswählen"),
     ("SS", "Heiz- / Kühlperiode", "Periode des Assessments auswählen"),
-    ("RP", "Regelprofil", "Profil-ID aus Bewertungsgrundlage und Periode erzeugen; Grenzwerte später hinterlegen"),
+    ("RP", "Regelprofil", "Profil-ID aus Bewertungsgrundlage und Periode erzeugen; SIA-IDA-2-Referenzwerte je Raum anzeigen"),
     ("BT", "Bachelor-Thesis Bewertungsmodell", "Fachlich vergleichbare Kriterien nach dokumentierter Methodik kombinieren; noch nicht automatisiert"),
     ("R", "Raum auswählen / hinzufügen", "Beliebig viele Räume getrennt erfassen"),
-    ("RD", "Raumspezifikation", "Raumgrösse, Nutzung und Belegung dokumentieren"),
+    ("RD", "Raumspezifikation", "Raumgrösse, Nutzung, Belegung und Konditionierung dokumentieren"),
     ("LA", "Lüftungsart je Raum", "Mechanisch, natürlich oder hybrid unterscheiden"),
     ("MV", "Messstrategie / Nachweiszweck", "Monitoring, Messkampagne oder Stichprobe definieren"),
     ("PF", "Pflichtdaten / optionale Daten", "Anforderungen je Profil zu einem späteren Zeitpunkt konfigurieren"),
@@ -63,7 +167,7 @@ def new_project():
 def new_room():
     return {"id": str(uuid4())[:8], "name": "Neuer Raum", "floor": "", "use": "Büro", "area_m2": None,
             "height_m": None, "occupancy": None, "ventilation": VENTILATIONS[0], "ventilation_notes": "",
-            "ventilation_mode": "", "strategy": STRATEGIES[0], "purpose": "", "start_date": "", "end_date": "",
+            "ventilation_mode": "", "conditioning": "", "active_cooling": False, "strategy": STRATEGIES[0], "purpose": "", "start_date": "", "end_date": "",
             "usage_times": "", "measurement_position": "", "conditions": "", "required_notes": "", "optional_notes": "",
             "device_manufacturer": "", "device_model": "", "device_id": "", "calibration": "",
             "measurements": [], "notes": ""}
@@ -183,7 +287,7 @@ def render_html_report(project, rooms, heading, suggestions=None):
              f"<h1>{esc(heading)}</h1>",
              f"<p><strong>Gebäude:</strong> {esc(building.get('name') or 'Nicht angegeben')} &nbsp; | &nbsp; <strong>Standort:</strong> {esc(building.get('location') or 'Nicht angegeben')}</p>",
              f"<p><strong>Bewertungsprofil:</strong> {esc(assessment.get('basis'))} · {esc(assessment.get('period'))}</p>",
-             "<p class='note'>Deskriptiver Prototypbericht. Keine normativen Grenzwerte angewendet; keine Konformitäts- oder Gesundheitsbeurteilung. Mittelwerte sind ungewichtete arithmetische Mittel der eingegebenen Einzelwerte.</p>"]
+             "<p class='note'>BT-Auswertung ist ein Orientierungs-Screening mit SECO-Komfort- und CO₂-Qualitätszielen. Kein Nachweis gesetzlicher, SIA- oder ECO-Konformität. Mittelwerte sind ungewichtete arithmetische Mittel.</p>"]
     for room in rooms:
         parts.append(f"<section><h2>{esc(room.get('name', 'Raum'))}</h2><p><strong>Nutzung:</strong> {esc(room.get('use'))} | <strong>Lüftung:</strong> {esc(room.get('ventilation'))} | <strong>Messstrategie:</strong> {esc(room.get('strategy'))}</p>")
         parts.append(f"<p><strong>Raumfläche:</strong> {esc(room.get('area_m2') or '–')} m² | <strong>Belegung:</strong> {esc(room.get('occupancy') if room.get('occupancy') is not None else '–')} | <strong>Messzeitraum:</strong> {esc(room.get('start_date') or '–')} bis {esc(room.get('end_date') or '–')}</p>")
@@ -195,6 +299,14 @@ def render_html_report(project, rooms, heading, suggestions=None):
             for _, row in stats.iterrows():
                 parts.append('<tr>'+''.join('<td>'+esc(v)+'</td>' for v in row)+'</tr>')
             parts.append('</tbody></table>')
+        if assessment.get("basis") == "Bachelor-Thesis – eigenes Bewertungsmodell":
+            screening = screening_rows(assessment, room)
+            if screening:
+                parts.append('<h3>BT-Orientierungs-Screening (kein Normkonformitätsnachweis)</h3>')
+                parts.append('<table><tr><th>Parameter</th><th>Zielwert</th><th>Anzahl Werte</th><th>Ausserhalb Ziel</th><th>Quelle</th></tr>')
+                for test in screening:
+                    parts.append('<tr>' + ''.join('<td>'+esc(test[k])+'</td>' for k in ["Parameter","BT-Orientierungswert","Messwerte","Ausserhalb Ziel","Quelle"]) + '</tr>')
+                parts.append('</table>')
         parts.append('<h3>Hinweise und nächste Schritte</h3><ul>')
         for rec in room_recommendations(room):
             parts.append('<li>'+esc(rec)+'</li>')
@@ -251,7 +363,7 @@ st.markdown("""<style>
 </style>""", unsafe_allow_html=True)
 
 st.title("IAQ Assessment Tool")
-st.caption("Funktionsprototyp · Schwerpunkt Innenraumluftqualität · **ohne normative Grenzwerte und ohne Konformitätsentscheid**")
+st.caption("Funktionsprototyp · SIA-IDA-2-Referenzmatrix hinterlegt · **noch keine automatische Normkonformitätsbewertung**")
 
 with st.sidebar:
     st.subheader("Navigation")
@@ -274,7 +386,7 @@ if page == "Übersicht":
     cols[3].metric("Räume ohne Hinweise", sum(not quality(r) for r in p["rooms"]))
     st.markdown("**Bearbeitungsablauf**")
     st.markdown("Gebäude → Bewertungsgrundlage → Heiz-/Kühlperiode → Raum → Lüftungsart → Messstrategie → Messdaten → Qualitätsprüfung → Raumberichte → Empfehlungen → Export")
-    st.info("Die zehn Regelprofile sind strukturell vorbereitet. Es werden **keine Grenzwerte angewendet**, keine Ampelbewertung berechnet und keine Einhaltung einer Norm bestätigt.")
+    st.info("Die SIA-IDA-2-Referenzwerte sind nach Periode, Lüftung und Konditionierung einsehbar. Eine automatische Normkonformitätsbewertung erfolgt noch nicht.")
     if not p["rooms"]:
         st.warning("Noch keine Räume angelegt. Öffne «3 · Räume & Lüftung».")
     else:
@@ -304,20 +416,23 @@ elif page == "2 · Bewertungsprofil":
     st.subheader("Bewertungsgrundlage und Periode")
     c1, c2 = st.columns(2)
     with c1:
-        a["basis"] = st.selectbox("Bewertungsgrundlage", BASES, index=BASES.index(a["basis"]))
+        a["basis"] = st.selectbox("Bewertungsgrundlage", BASES, index=BASES.index(a["basis"]) if a.get("basis") in BASES else 0)
     with c2:
         a["period"] = st.radio("Saison", PERIODS, index=PERIODS.index(a["period"]), horizontal=True)
     st.info(f"Aktiver Regelprofil-Schlüssel: **{profile_summary()}** · {a['basis']} · {a['period']}")
     a["purpose"] = st.text_area("Ziel / Nachweiszweck der Gesamtbewertung", a["purpose"])
     a["notes"] = st.text_area("Anmerkungen zur Wahl der Grundlage", a["notes"])
-    st.markdown("**Vorgesehene zehn Regelprofile**")
+    st.markdown("**Vorgesehene acht Regelprofile**")
     st.caption(PROFILE_DESCRIPTIONS[a["basis"]])
-    if a["basis"] == BASES[4]:
+    if a["basis"] == BASES[-1]:
         st.warning("Dieses Profil ist ein eigenständig entwickeltes Modell und keine amtliche Norm. Vergleichbarkeit und Anwendbarkeit jedes Kriteriums müssen vor einer automatischen Auswahl begründet werden.")
         a["thesis_method"] = st.text_area("Methodik / Auswahl der strengsten vergleichbaren Anforderungen", a.get("thesis_method", ""))
         a["thesis_sources"] = st.text_area("Herkunft der Kriterien / Normstellen", a.get("thesis_sources", ""))
-    st.dataframe(pd.DataFrame([{"Kürzel": code, "Grundlage": base, "Periode": period, "Grenzwerte": "Noch nicht hinterlegt", "Pflichtfeldregeln": "Noch festzulegen", "Geltungsbereich": PROFILE_DESCRIPTIONS[base]} for (base, period), code in PROFILE_IDS.items()]), use_container_width=True, hide_index=True)
-    st.caption("Die Wahl des Regelprofils wird im Projekt gespeichert. Sie löst aktuell noch keine automatische normative Entscheidung aus. Die Heiz-/Kühlperiode ist vorbereitet, ohne saisonale Unterschiede zu behaupten.")
+    st.dataframe(pd.DataFrame([{"Kürzel": code, "Grundlage": base, "Periode": period, "Referenzwerte": "Hinterlegt (Screening, keine Konformitätsprüfung)", "Geltungsbereich": PROFILE_DESCRIPTIONS[base]} for (base, period), code in PROFILE_IDS.items()]), use_container_width=True, hide_index=True)
+    st.caption("Regelprofile zeigen Quellenwerte; BT prüft nur einfache Orientierungsbereiche. Kein Norm- oder Gesetzeskonformitätsnachweis.")
+    if a["basis"] == "SIA 382/1:2025":
+        st.markdown("**SIA – alle Szenarien (IDA 2, Vergleich IEQ II)**")
+        st.dataframe(pd.DataFrame([x for x in SIA_IDA2_MATRIX if x["Periode"] == a["period"]]), use_container_width=True, hide_index=True)
 
 elif page == "3 · Räume & Lüftung":
     st.subheader("Raumspezifikation")
@@ -346,10 +461,17 @@ elif page == "3 · Räume & Lüftung":
             r["occupancy"] = number_input_nullable("Typische Belegung (Personen)", r["occupancy"], f"occ_{selected}", fmt="%.0f")
         with c2:
             r["ventilation"] = st.radio("Lüftungsart dieses Raums", VENTILATIONS, index=VENTILATIONS.index(r["ventilation"]), key=f"vent_{selected}")
+            st.caption("Projektannahme: Alle untersuchten Büros sind grundsätzlich beheizbar.")
+            if a["period"] == "Kühlperiode":
+                r["active_cooling"] = st.checkbox("Raum aktuell aktiv gekühlt", value=bool(r.get("active_cooling", False)), key=f"cool_{selected}")
+            else:
+                r["active_cooling"] = False
+            r["conditioning"] = "Aktiv gekühlt" if r["active_cooling"] else ("Beheizbar" if a["period"] == "Heizperiode" else "Ohne aktive Kühlung")
             r["ventilation_notes"] = st.text_area("Lüftungsbetrieb / Fensteröffnungen", r["ventilation_notes"], key=f"vn_{selected}")
             if r["ventilation"] == VENTILATIONS[2]:
-                r["ventilation_mode"] = st.text_input("Aktiver Betriebsmodus / Wechsel der Betriebsmodi", r["ventilation_mode"], key=f"vm_{selected}")
+                r["ventilation_mode"] = st.selectbox("Aktueller hybrider Lüftungsmodus", ["Nicht erfasst", "Mechanisch", "Natürlich"], index=["Nicht erfasst", "Mechanisch", "Natürlich"].index(r.get("ventilation_mode") if r.get("ventilation_mode") in ["Nicht erfasst", "Mechanisch", "Natürlich"] else "Nicht erfasst"), key=f"vm_{selected}")
             r["notes"] = st.text_area("Weitere raumspezifische Informationen", r["notes"], key=f"rn_{selected}")
+        show_profile_rule(a, r)
         st.divider()
         st.markdown("**Messstrategie und Nachweiszweck**")
         r["strategy"] = st.selectbox("Messsituation", STRATEGIES, index=STRATEGIES.index(r["strategy"]), key=f"strategy_{selected}")
@@ -453,11 +575,11 @@ elif page == "5 · Qualitätsprüfung":
                 st.success("Grundprüfung bestanden. Keine Aussage über Einhaltung von Normen.")
     st.divider()
     st.subheader("Normbewertung")
-    st.info("Noch nicht implementiert: Grenzwerte, Klassierungslogik, anwendungsbezogene Pflichtfelder, Messunsicherheit und Bestehen/Nichtbestehen.")
+    st.info("BT-Orientierungs-Screening verfügbar. Eine vollständige Normbewertung (Messunsicherheit, Belegungszeiten, operative Temperatur, ECO-Messverfahren) ist noch nicht implementiert.")
 
 elif page == "6 · Raumberichte":
     st.subheader("Raumspezifische Berichte")
-    st.caption("Für jeden Raum ein eigener deskriptiver Bericht mit Messwertübersicht, Datenqualität und Handlungsempfehlungen. Noch keine Normbewertung.")
+    st.caption("Raumbericht mit deskriptiven Messwerten und BT-Orientierungs-Screening; keine vollständige Normbewertung.")
     if not p["rooms"]:
         st.info("Bitte zuerst Räume erfassen.")
     else:
@@ -468,7 +590,7 @@ elif page == "6 · Raumberichte":
         c2.metric("Messgrössen", len({m["parameter"] for m in valid_measurements(r)}))
         c3.metric("Offene Grundprüfungen", len(quality(r)))
         st.markdown("**Raum und Messsituation**")
-        st.write(f"**Lüftung:** {r['ventilation']} · **Strategie:** {r['strategy']} · **Nutzung:** {r.get('use', '')}")
+        st.write(f"**Lüftung:** {r['ventilation']} · **Konditionierung:** {r.get('conditioning', 'nicht angegeben')} · **Strategie:** {r['strategy']} · **Nutzung:** {r.get('use', '')}")
         st.write(f"**Messzeitraum:** {r.get('start_date') or 'nicht angegeben'} bis {r.get('end_date') or 'nicht angegeben'}")
         stats = room_statistics(r)
         st.markdown("**Deskriptive Messwertstatistik**")
@@ -491,6 +613,7 @@ elif page == "6 · Raumberichte":
                     st.info("Für diese Messgrösse liegen keine lesbaren Zeitstempel vor.")
             else:
                 st.info("Kein Zeitverlauf möglich, da Zeitstempel fehlen.")
+        show_profile_rule(a, r)
         st.markdown("**Hinweise für diesen Raum**")
         for rec in room_recommendations(r):
             st.markdown("- " + rec)
